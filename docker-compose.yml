@@ -1,0 +1,114 @@
+version: '3.9'
+
+networks:
+  bridge:
+    driver: bridge
+
+services:
+  zookeeper:
+    image: 'bitnami/zookeeper:latest'
+    ports:
+      - '2181:2181'
+    environment:
+      - ALLOW_ANONYMOUS_LOGIN=yes
+    networks:
+      - bridge
+
+  kafka:
+    image: 'bitnami/kafka:latest'
+    user: root
+    ports:
+      - '9092:9092'
+    environment:
+      - KAFKA_BROKER_ID=1
+      - KAFKA_LISTENERS=PLAINTEXT://:9092
+      # for local testing, use below env var, instead of the one with kafka:9092
+      # - KAFKA_ADVERTISED_LISTENERS=PLAINTEXT://127.0.0.1:9092
+      - KAFKA_ADVERTISED_LISTENERS=PLAINTEXT://kafka:9092
+      - KAFKA_ZOOKEEPER_CONNECT=zookeeper:2181
+      - ALLOW_PLAINTEXT_LISTENER=yes
+      - KAFKA_CFG_AUTO_CREATE_TOPICS_ENABLE=true # allow creation of new topic directly through code
+    networks:
+      - bridge
+    depends_on:
+      - zookeeper
+
+  # to initialize topic in kafka 
+  init-kafka:
+    image: 'bitnami/kafka:latest'
+    depends_on:
+      - kafka
+    entrypoint: [ '/bin/sh', '-c' ]
+    command: |
+      "
+      # blocks until kafka is reachable
+      kafka-topics.sh --bootstrap-server kafka:9092 --list
+
+      echo -e 'Creating kafka topic called datastream'
+      kafka-topics.sh --bootstrap-server kafka:9092 --create --if-not-exists --topic datastream --replication-factor 1 --partitions 1
+
+      echo -e 'Successfully created the following topics:'
+      kafka-topics.sh --bootstrap-server kafka:9092 --list
+      "
+    networks:
+      - bridge
+
+  flink-processor:
+    build:
+      context: ./flink-processor
+    depends_on:
+      generate-data:
+        condition: service_completed_successfully
+    environment:
+      KAFKA_SERVER: "kafka:9092"
+      ZOOKEEPER_SERVER: "zookeeper:2181"
+      PRODUCER_INTERVAL: 100
+    networks:
+      - bridge
+
+  # service to send events to kafka topic
+  kafka-producer:
+    build:
+      context: ./kafka-producer
+    depends_on:
+      kafka:
+        condition: service_started
+      generate-data:
+        condition: service_completed_successfully # this means that the service will not start unless generate-data is done
+    environment:
+      KAFKA_SERVER: "kafka:9092"
+      ZOOKEEPER_SERVER: "zookeeper:2181"
+      PRODUCER_INTERVAL: 100
+    networks:
+      - bridge
+
+  generate-data:
+    build:
+      context: ./generate-data
+    container_name: generate-data
+    depends_on:
+      - postgres
+    networks:
+      - bridge
+
+  postgres:
+    build:
+      context: ./postgres
+    container_name: postgres
+    restart: always
+    environment:
+      - POSTGRES_USER=postgres
+      - POSTGRES_PASSWORD=postgres
+      - POSTGRES_DB=postgres
+    logging:
+      options:
+        max-size: 10m
+        max-file: "3"
+    ports:
+      - 5432:5432
+    networks:
+      - bridge
+
+volumes:
+  settings:
+  data:
